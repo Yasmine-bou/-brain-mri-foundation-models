@@ -1,0 +1,19 @@
+# Ignore all data files and subfolders
+/data/*
+
+# Except the data README
+!/data/README.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.ipynb_checkpoints/
+
+# Model checkpoints
+*.pt
+*.pth
+
+# System files
+.DS_Store
+Thumbs.db
