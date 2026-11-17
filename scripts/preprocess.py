@@ -1,9 +1,28 @@
-"""Preprocess a whole dataset (FeTA or BOBs) and save the results.
 
-Runs src.preprocess.preprocess_subject on every image/mask pair and writes
-the outputs to data/processed/<dataset>/, keeping the BIDS folder layout
-and filenames. Also writes config.json with the settings used.
+"""Run MRI preprocessing on an entire FeTA or BOBs dataset.
+
+This script applies the preprocessing pipeline defined in src/preprocess.py
+to every T2-weighted MRI and its corresponding segmentation mask.
+
+The pipeline includes:
+    1. Reorientation to RAS.
+    2. Replacement of invalid MRI intensities (NaN and Inf).
+    3. Resampling to the specified voxel spacing.
+    4. Foreground cropping with a configurable margin.
+    5. Optional zero-padding to a target shape.
+    6. Per-volume foreground Z-score intensity normalization.
+
+Processed files are saved under data/processed/<dataset>/ by default,
+preserving the original BIDS-like folder structure and filenames.
+
+A config.json file records the preprocessing parameters for
+reproducibility.
+
+For FeTA + FOMO25, the default voxel spacing is 1 mm isotropic,
+and global padding is disabled. Patch extraction will be handled
+separately during training.
 """
+
 import argparse
 import json
 import sys
@@ -11,98 +30,231 @@ import time
 from pathlib import Path
 
 import nibabel as nib
-import numpy as np
 
+
+# Resolve the project root so the script can import from src/.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 from src.preprocess import (  # noqa: E402
     find_image_label_pairs,
     preprocess_subject,
-    resample_and_crop,
 )
 
+
+# Dataset locations and segmentation filename conventions.
 DATASETS = {
-    "feta": {"dir": PROJECT_ROOT / "data" / "FeTA" / "feta_2.4", "seg_suffix": "_dseg"},
-    "bobs": {"dir": PROJECT_ROOT / "data" / "bobs" / "resampled75", "seg_suffix": "_desc-bobs9_dseg"},
+    "feta": {
+        "dir": PROJECT_ROOT / "data" / "FeTA" / "feta_2.4",
+        "seg_suffix": "_dseg",
+    },
+    "bobs": {
+        "dir": PROJECT_ROOT / "data" / "bobs" / "resampled75",
+        "seg_suffix": "_desc-bobs9_dseg",
+    },
 }
 
 
-def measure_target_shape(pairs, spacing, margin, multiple=16):
-    """Largest shape after resample + crop, rounded up to a multiple of 16."""
-    shapes = []
-    t0 = time.time()
-    for k, (img_path, seg_path) in enumerate(pairs, start=1):
-        img, _ = resample_and_crop(img_path, seg_path, spacing=spacing, margin=margin)
-        shapes.append(img.shape)
-        print(f"  measuring {k}/{len(pairs)} {img_path.name} {img.shape} ({time.time() - t0:.0f}s)")
-    max_shape = np.array(shapes).max(axis=0)
-    target = tuple(int(n) for n in np.ceil(max_shape / multiple) * multiple)
-    print(f"max shape per axis: {tuple(int(n) for n in max_shape)} -> target shape: {target}")
-    return target, tuple(int(n) for n in max_shape)
-
-
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--dataset", required=True, choices=DATASETS.keys())
-    parser.add_argument("--data-dir", type=Path, help="override the dataset folder")
-    parser.add_argument("--out-dir", type=Path, help="default: data/processed/<dataset>")
-    parser.add_argument("--spacing", type=float, nargs=3, default=[0.5, 0.5, 0.5], help="voxel size in mm")
-    parser.add_argument("--margin", type=int, default=5, help="voxels kept around the brain when cropping")
-    parser.add_argument("--target-shape", type=int, nargs=3, help="pad shape; measured from the data if omitted")
-    parser.add_argument("--limit", type=int, help="only process the first N subjects (for testing)")
+    """Preprocess a dataset and save the resulting MRI/mask pairs.
+
+    Parses command-line arguments, identifies matching MRI and
+    segmentation files, and applies preprocess_subject() to each pair.
+
+    Command-line arguments:
+        --dataset:
+            Dataset to preprocess: "feta" or "bobs" (required).
+
+        --data-dir:
+            Optional override for the input dataset directory.
+
+        --out-dir:
+            Optional override for the output directory.
+
+        --spacing:
+            Target voxel spacing in millimeters.
+            Defaults to (1.0, 1.0, 1.0).
+
+        --margin:
+            Number of voxels kept around the foreground during cropping.
+            Defaults to 5.
+
+        --target-shape:
+            Optional dimensions for zero-padding.
+            If omitted, no global padding is applied.
+
+        --limit:
+            Optional maximum number of image/mask pairs to process,
+            useful for testing.
+
+    Outputs:
+        Preprocessed NIfTI images and segmentation masks, preserving
+        their relative directory structure.
+
+        config.json containing the dataset, preprocessing steps,
+        and parameters used.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Parse command-line arguments
+    # ---------------------------------------------------------
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        choices=DATASETS.keys(),
+        help="Dataset to preprocess.",
+    )
+
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help="Override the dataset directory.",
+    )
+
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        help="Override the output directory.",
+    )
+
+    parser.add_argument(
+        "--spacing",
+        type=float,
+        nargs=3,
+        default=[1.0, 1.0, 1.0],
+        help="Target voxel spacing in mm (default: 1 mm isotropic).",
+    )
+
+    parser.add_argument(
+        "--margin",
+        type=int,
+        default=5,
+        help="Foreground cropping margin in voxels (default: 5).",
+    )
+
+    parser.add_argument(
+        "--target-shape",
+        type=int,
+        nargs=3,
+        help="Optional target shape for zero-padding.",
+    )
+
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Process only the first N image/mask pairs for testing.",
+    )
+
     args = parser.parse_args()
 
+    # ---------------------------------------------------------
+    # 2. Resolve paths and preprocessing parameters
+    # ---------------------------------------------------------
     data_dir = args.data_dir or DATASETS[args.dataset]["dir"]
-    out_dir = args.out_dir or PROJECT_ROOT / "data" / "processed" / args.dataset
+
+    out_dir = (
+        args.out_dir
+        or PROJECT_ROOT / "data" / "processed" / args.dataset
+    )
+
     spacing = tuple(args.spacing)
 
-    pairs = find_image_label_pairs(data_dir, seg_suffix=DATASETS[args.dataset]["seg_suffix"])
-    if args.limit:
-        pairs = pairs[: args.limit]
+    # No global padding unless explicitly requested.
+    target_shape = (
+        tuple(args.target_shape)
+        if args.target_shape is not None
+        else None
+    )
+
+    # ---------------------------------------------------------
+    # 3. Find MRI and segmentation pairs
+    # ---------------------------------------------------------
+    pairs = find_image_label_pairs(
+        data_dir,
+        seg_suffix=DATASETS[args.dataset]["seg_suffix"],
+    )
+
+    if args.limit is not None:
+        pairs = pairs[:args.limit]
+
+    if not pairs:
+        raise ValueError(f"No MRI/segmentation pairs found in {data_dir}")
+
     print(f"{args.dataset}: {len(pairs)} pairs in {data_dir}")
 
-    max_shape = None
-    if args.target_shape:
-        target_shape = tuple(args.target_shape)
-    else:
-        print("No --target-shape given, measuring it (slow)...")
-        target_shape, max_shape = measure_target_shape(pairs, spacing, args.margin)
-
+    # ---------------------------------------------------------
+    # 4. Preprocess and save each MRI/segmentation pair
+    # ---------------------------------------------------------
     out_dir.mkdir(parents=True, exist_ok=True)
+
     t0 = time.time()
+
     for k, (img_path, seg_path) in enumerate(pairs, start=1):
+
+        # Apply the same spatial preprocessing to the MRI and mask.
         img, seg = preprocess_subject(
-            img_path, seg_path, target_shape=target_shape, spacing=spacing, margin=args.margin
+            img_path,
+            seg_path,
+            target_shape=target_shape,
+            spacing=spacing,
+            margin=args.margin,
         )
-        # keep the BIDS layout: sub-XXX/(ses-YYY/)anat/<same filename>
+
+        # Preserve the original BIDS-like directory structure.
         img_out = out_dir / img_path.relative_to(data_dir)
         seg_out = out_dir / seg_path.relative_to(data_dir)
+
         img_out.parent.mkdir(parents=True, exist_ok=True)
+
         nib.save(img, img_out)
         nib.save(seg, seg_out)
-        print(f"  {k}/{len(pairs)} {img_path.name} -> {img.shape} ({time.time() - t0:.0f}s)")
 
+        print(
+            f"  {k}/{len(pairs)} {img_path.name} "
+            f"-> {img.shape} ({time.time() - t0:.0f}s)"
+        )
+
+    # ---------------------------------------------------------
+    # 5. Save preprocessing configuration for reproducibility
+    # ---------------------------------------------------------
     config = {
         "dataset": args.dataset,
-        "source_dir": str(data_dir.relative_to(PROJECT_ROOT) if data_dir.is_relative_to(PROJECT_ROOT) else data_dir),
+        "source_dir": str(
+            data_dir.relative_to(PROJECT_ROOT)
+            if data_dir.is_relative_to(PROJECT_ROOT)
+            else data_dir
+        ),
         "n_subjects": len(pairs),
         "steps": [
             "reorient to RAS",
             "fill NaN/inf with 0 (image)",
             "resample (image: linear, mask: nearest)",
             "crop to image foreground",
-            "pad with zeros (centred)",
-            "min-max scale to [0, 1] (image)",
+            "optional zero-padding (if target_shape is specified)",
+            "per-volume foreground Z-score normalization (image)",
         ],
         "spacing_mm": list(spacing),
         "crop_margin_voxels": args.margin,
-        "target_shape": list(target_shape),
-        "measured_max_shape": list(max_shape) if max_shape else None,
-        "label_remapping": None,  # TODO: step 8
+        "target_shape": (
+            list(target_shape)
+            if target_shape is not None
+            else None
+        ),
+        "label_remapping": None,
     }
-    (out_dir / "config.json").write_text(json.dumps(config, indent=2))
-    print(f"Done: {len(pairs)} subjects saved to {out_dir}")
+
+    config_path = out_dir / "config.json"
+    config_path.write_text(
+        json.dumps(config, indent=2),
+        encoding="utf-8",
+    )
+
+    print(f"Done: {len(pairs)} pairs saved to {out_dir}")
 
 
 if __name__ == "__main__":
