@@ -14,6 +14,9 @@ The pipeline includes:
 
 Processed files are saved under data/processed/<dataset>/ by default,
 preserving the original BIDS-like folder structure and filenames.
+Each volume is saved twice: as NIfTI (.nii.gz, keeps the affine, for
+viewing and checks) and as NumPy (.npy, plain array for fast loading
+during training; image float32, mask uint8).
 
 A config.json file records the preprocessing parameters for
 reproducibility.
@@ -30,6 +33,7 @@ import time
 from pathlib import Path
 
 import nibabel as nib
+import numpy as np
 
 
 # Resolve the project root so the script can import from src/.
@@ -53,6 +57,11 @@ DATASETS = {
         "seg_suffix": "_desc-bobs9_dseg",
     },
 }
+
+
+def npy_path(nifti_path: Path) -> Path:
+    """Return the .npy path next to a .nii.gz file (x_T2w.nii.gz -> x_T2w.npy)."""
+    return nifti_path.with_suffix("").with_suffix(".npy")
 
 
 def main():
@@ -90,6 +99,9 @@ def main():
     Outputs:
         Preprocessed NIfTI images and segmentation masks, preserving
         their relative directory structure.
+
+        The same volumes as NumPy arrays (.npy) next to each NIfTI file:
+        the image as float32 and the mask as uint8.
 
         config.json containing the dataset, preprocessing steps,
         and parameters used.
@@ -211,8 +223,13 @@ def main():
 
         img_out.parent.mkdir(parents=True, exist_ok=True)
 
+        # NIfTI: keeps the affine, can be opened in a viewer.
         nib.save(img, img_out)
         nib.save(seg, seg_out)
+
+        # NumPy: plain arrays for fast loading during training.
+        np.save(npy_path(img_out), img.get_fdata(dtype=np.float32))
+        np.save(npy_path(seg_out), np.asarray(seg.dataobj).astype(np.uint8))
 
         print(
             f"  {k}/{len(pairs)} {img_path.name} "
@@ -237,6 +254,7 @@ def main():
             "crop to image foreground",
             "optional zero-padding (if target_shape is specified)",
             "per-volume foreground Z-score normalization (image)",
+            "save as NIfTI and NumPy (.npy: image float32, mask uint8)",
         ],
         "spacing_mm": list(spacing),
         "crop_margin_voxels": args.margin,

@@ -102,10 +102,11 @@ def crop_to_foreground(
     seg: nib.Nifti1Image,
     margin: int = 5,
 ) -> tuple[nib.Nifti1Image, nib.Nifti1Image]:
-    """Crop an MRI and its segmentation to the image foreground.
+    """Crop an MRI and its segmentation to their joint foreground.
 
-    Identifies MRI voxels with positive intensities and computes the
-    smallest bounding box containing them.
+    Identifies voxels where the MRI is positive or the mask is labelled,
+    and computes the smallest bounding box containing them, so no
+    labelled voxel is ever removed.
 
     The same bounding box is applied to the MRI and segmentation to
     preserve their spatial correspondence.
@@ -129,9 +130,12 @@ def crop_to_foreground(
         ValueError: If the MRI contains no positive-intensity voxels.
     """
     data = image.get_fdata(dtype=np.float32)
-    foreground = np.argwhere(data > 0)
+    mask = np.asarray(seg.dataobj)
+    # Union of image and mask: some masks (e.g. BOBs) label voxels where
+    # the MRI is 0, and an image-only box would cut those labels off.
+    foreground = np.argwhere((data > 0) | (mask > 0))
     if foreground.size == 0:
-        raise ValueError("Image has no non-zero voxels, cannot crop.")
+        raise ValueError("Image and mask are empty, cannot crop.")
 
     start = np.maximum(foreground.min(axis=0) - margin, 0)
     end = np.minimum(foreground.max(axis=0) + 1 + margin, data.shape)

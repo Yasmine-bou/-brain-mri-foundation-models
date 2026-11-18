@@ -1,28 +1,50 @@
 
-"""Validate preprocessed FeTA MRI and segmentation files.
+"""Validate preprocessed FeTA or BOBs MRI and segmentation files.
 
 Checks spatial consistency, intensity normalization, and segmentation
 labels. Prints a summary of passed and failed subjects.
+
+Usage (from the project root):
+    python scripts/check_preprocessing.py                  # FeTA (default)
+    python scripts/check_preprocessing.py --dataset bobs
 """
 
+import argparse
 from pathlib import Path
 
 import nibabel as nib
 import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data" / "processed" / "feta_fomo"
 
-EXPECTED_LABELS = set(range(8))
+# Where each processed dataset lives, how its masks are named,
+# and which label values are allowed.
+DATASETS = {
+    "feta": {
+        "dir": PROJECT_ROOT / "data" / "processed" / "feta_fomo",
+        "seg_suffix": "_dseg",
+        "labels": set(range(8)),                 # 0-7
+    },
+    "bobs": {
+        "dir": PROJECT_ROOT / "data" / "processed" / "bobs_fomo",
+        "seg_suffix": "_desc-bobs9_dseg",
+        "labels": {0, 2, 3, 5, 6, 7, 8, 9},      # values found in BOBs9 during EDA
+    },
+}
+
 EXPECTED_SPACING = (1.0, 1.0, 1.0)
 
 
-def check_subject(img_path: Path) -> list[str]:
+def check_subject(
+    img_path: Path,
+    seg_suffix: str = "_dseg",
+    expected_labels: set[int] = DATASETS["feta"]["labels"],
+) -> list[str]:
     """Return validation errors for one preprocessed MRI/mask pair."""
     errors = []
 
     seg_path = img_path.with_name(
-        img_path.name.replace("_T2w.nii.gz", "_dseg.nii.gz")
+        img_path.name.replace("_T2w.nii.gz", f"{seg_suffix}.nii.gz")
     )
 
     if not seg_path.exists():
@@ -71,27 +93,48 @@ def check_subject(img_path: Path) -> list[str]:
     # Segmentation checks
     if not np.isfinite(mask).all():
         errors.append("NaN or Inf segmentation values")
-    elif not np.all(np.isin(np.unique(mask), list(EXPECTED_LABELS))):
+    elif not np.all(np.isin(np.unique(mask), list(expected_labels))):
         errors.append("Unexpected segmentation labels")
 
     if not np.any(mask > 0):
         errors.append("Empty segmentation")
 
+    # NumPy copies: must exist and contain the same arrays as the NIfTI files
+    img_npy = img_path.with_suffix("").with_suffix(".npy")
+    seg_npy = seg_path.with_suffix("").with_suffix(".npy")
+
+    if not img_npy.exists() or not seg_npy.exists():
+        errors.append("Missing .npy file")
+    else:
+        if not np.array_equal(np.load(img_npy), data):
+            errors.append("Image .npy differs from NIfTI")
+        if not np.array_equal(np.load(seg_npy), mask):
+            errors.append("Mask .npy differs from NIfTI")
+
     return errors
 
 
 def main():
-    """Check all processed FeTA subjects and print a summary."""
-    image_paths = sorted(DATA_DIR.glob("sub-*/**/anat/*_T2w.nii.gz"))
+    """Check all processed subjects of one dataset and print a summary."""
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--dataset", choices=DATASETS.keys(), default="feta")
+    parser.add_argument("--data-dir", type=Path, help="Override the processed data directory.")
+    args = parser.parse_args()
+
+    settings = DATASETS[args.dataset]
+    data_dir = args.data_dir or settings["dir"]
+
+    image_paths = sorted(data_dir.glob("sub-*/**/anat/*_T2w.nii.gz"))
 
     if not image_paths:
-        raise FileNotFoundError(f"No preprocessed MRIs found in {DATA_DIR}")
+        raise FileNotFoundError(f"No preprocessed MRIs found in {data_dir}")
 
     passed = 0
     failed = 0
 
     for img_path in image_paths:
-        errors = check_subject(img_path)
+        errors = check_subject(img_path, settings["seg_suffix"], settings["labels"])
 
         if errors:
             failed += 1
