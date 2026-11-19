@@ -4,9 +4,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import json
 from torch.utils.data import Dataset
 
 from src.data_utils import load_nifti
+
+BOBS_LABEL_MAPPING = {
+    0: 0,
+    2: 1,
+    3: 2,
+    5: 3,
+    6: 4,
+    7: 5,
+    8: 6,
+    9: 7,
+}
 
 
 class BOBsDataset(Dataset):
@@ -181,3 +193,167 @@ class FeTADataset(Dataset):
             "mask": seg,
             "subject": sample["subject"],
         }
+
+
+class BrainMRIPatchDataset(Dataset):
+    """PyTorch Dataset for preprocessed 3D MRI segmentation patches.
+
+    Loads MRI/mask pairs from .npy files and extracts aligned 3D patches.
+    Supports FeTA and BOBs, using their subject-level splits.
+
+    Training patches are sampled randomly. Validation and test patches
+    are centered for reproducible pipeline checks.
+
+    Args:
+        data_dir: Directory containing preprocessed MRI/mask files.
+        splits_path: JSON file containing the dataset splits.
+        dataset: Either "feta" or "bobs".
+        split: Split to load (e.g. "train" or "val").
+        patch_size: Size of the extracted 3D patches.
+    """
+
+    def __init__(
+        self,
+        data_dir: Path,
+        splits_path: Path,
+        dataset: str = "feta",
+        split: str = "train",
+        patch_size: tuple[int, int, int] = (96, 96, 96),
+    ):
+        self.data_dir = Path(data_dir)
+        self.dataset = dataset
+        self.split = split
+        self.patch_size = tuple(patch_size)
+
+        if dataset not in ("feta", "bobs"):
+            raise ValueError("dataset must be 'feta' or 'bobs'")
+
+        if len(self.patch_size) != 3 or any(s <= 0 for s in self.patch_size):
+            raise ValueError("patch_size must contain three positive integers")
+
+        # Load the subject IDs assigned to this split.
+        with open(splits_path, encoding="utf-8") as f:
+            splits = json.load(f)
+
+        if split not in splits:
+            raise ValueError(f"Unknown split: {split}")
+
+        subject_ids = set(splits[split])
+
+        # BOBs segmentation files have a different naming convention.
+        seg_suffix = (
+            "_dseg.npy" if dataset == "feta"
+            else "_desc-bobs9_dseg.npy"
+        )
+
+        self.samples = []
+
+        for img_path in sorted(
+            self.data_dir.glob("sub-*/**/anat/*_T2w.npy")
+        ):
+            subject = next(
+                part for part in img_path.parts
+                if part.startswith("sub-")
+            )
+
+            if subject not in subject_ids:
+                continue
+
+            seg_path = img_path.with_name(
+                img_path.name.replace("_T2w.npy", seg_suffix)
+            )
+
+            if not seg_path.exists():
+                raise FileNotFoundError(f"Missing mask: {seg_path}")
+
+            self.samples.append({
+                "subject": subject,
+                "session": next(
+                    (part for part in img_path.parts
+                     if part.startswith("ses-")),
+                    None,
+                ),
+                "mri_path": img_path,
+                "seg_path": seg_path,
+            })
+
+        # Make sure every requested subject was found.
+        found_ids = {s["subject"] for s in self.samples}
+
+        if found_ids != subject_ids:
+            raise ValueError(
+                f"Missing subjects: {sorted(subject_ids - found_ids)}"
+            )
+
+        if not self.samples:
+            raise ValueError(f"No MRI samples found for {dataset}/{split}")
+
+    def __len__(self):
+        """Return the number of MRI sessions in the split."""
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        """Return one aligned MRI/mask patch as PyTorch tensors."""
+        sample = self.samples[index]
+
+        image = np.load(sample["mri_path"]).astype(np.float32)
+        mask = np.load(sample["seg_path"]).astype(np.int64)
+
+        # Convert BOBs labels to consecutive class IDs (0-7).
+        if self.dataset == "bobs":
+            original_labels = set(np.unique(mask).tolist())
+
+            if not original_labels.issubset(BOBS_LABEL_MAPPING):
+                raise ValueError(f"Unexpected BOBs labels: {original_labels}")
+
+            remapped_mask = np.zeros_like(mask)
+
+            for original, new in BOBS_LABEL_MAPPING.items():
+                remapped_mask[mask == original] = new
+
+            mask = remapped_mask
+
+
+        if image.shape != mask.shape:
+            raise ValueError(
+                f"Shape mismatch: {sample['mri_path'].name}"
+            )
+
+        # Add local padding only when a dimension is too small.
+        padding = []
+        for dim, size in zip(image.shape, self.patch_size):
+            total = max(0, size - dim)
+            before = total // 2
+            after = total - before
+            padding.append((before, after))
+
+        image = np.pad(image, padding, mode="constant")
+        mask = np.pad(mask, padding, mode="constant")
+
+        # Random patch for training; center patch for validation/test.
+        if self.split == "train":
+            starts = [
+                np.random.randint(0, dim - size + 1)
+                for dim, size in zip(image.shape, self.patch_size)
+            ]
+        else:
+            starts = [
+                (dim - size) // 2
+                for dim, size in zip(image.shape, self.patch_size)
+            ]
+
+        slices = tuple(
+            slice(start, start + size)
+            for start, size in zip(starts, self.patch_size)
+        )
+
+        image_patch = np.ascontiguousarray(image[slices])
+        mask_patch = np.ascontiguousarray(mask[slices])
+
+        return {
+            "image": torch.from_numpy(image_patch).unsqueeze(0),
+            "mask": torch.from_numpy(mask_patch),
+            "subject": sample["subject"],
+            "session": sample["session"] or "",
+        }
+
