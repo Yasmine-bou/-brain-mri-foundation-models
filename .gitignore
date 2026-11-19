@@ -1,19 +1,57 @@
-# Ignore all data files and subfolders
+
+# ============================================================
+# DATA
+# ============================================================
+
+# Ignore all datasets and generated data
 /data/*
 
-# Except the data README
+# Keep data documentation
 !/data/README.md
 
-# Python
-__pycache__/
-*.pyc
-.venv/
-.ipynb_checkpoints/
+# Keep predefined train/val/test splits
+!/data/splits/
+!/data/splits/*.json
 
-# Model checkpoints
+# Raw and preprocessed nnU-Net data
+/data/nnUNet_raw/
+/data/nnUNet_preprocessed/
+/data/nnUNet_results/
+
+# Preprocessing quality-control images
+/data/qa_feta_ssl3d/
+
+# ============================================================
+# PYTHON
+# ============================================================
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# ============================================================
+# MODEL CHECKPOINTS
+# ============================================================
+
 *.pt
 *.pth
+*.ckpt
 
-# System files
+# ============================================================
+# EXPERIMENT OUTPUTS
+# ============================================================
+
+runs/
+wandb/
+tensorboard/
+
+# ============================================================
+# SYSTEM FILES
+# ============================================================
+
 .DS_Store
 Thumbs.db
