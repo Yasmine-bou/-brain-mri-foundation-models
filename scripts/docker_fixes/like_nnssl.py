@@ -2,15 +2,19 @@ from copy import deepcopy
 import os
 from typing import Literal, get_args
 import torch
-import numpy as np
 
 # from numpy.core.multiarray
 
-from nnunetv2.preprocessing.preprocessors.default_preprocessor import DefaultPreprocessor
-from nnunetv2.utilities.plans_handling.plans_handler import ConfigurationManager, PlansManager
+from nnunetv2.preprocessing.preprocessors.default_preprocessor import (
+    DefaultPreprocessor,
+)
+from nnunetv2.utilities.plans_handling.plans_handler import (
+    ConfigurationManager,
+    PlansManager,
+)
 from nnunetv2.paths import nnUNet_preprocessed
 from nnunetv2.utilities.dataset_name_id_conversion import convert_id_to_dataset_name
-from batchgenerators.utilities.file_and_folder_operations import join, load_json, save_json, isfile
+from batchgenerators.utilities.file_and_folder_operations import join, save_json, isfile
 import argparse
 from pathlib import Path
 from huggingface_hub import hf_hub_download
@@ -48,7 +52,9 @@ def new_spacing_from_mode(
         return original_spacing
     elif adaptation_mode == "fixed":
         if override_spacing is None:
-            raise ValueError("You need to provide a spacing when using the fixed adaptation mode.")
+            raise ValueError(
+                "You need to provide a spacing when using the fixed adaptation mode."
+            )
         if len(override_spacing) != 3:
             raise ValueError("The override spacing must be a list of three floats.")
         if not all(isinstance(i, (int, float)) for i in override_spacing):
@@ -93,8 +99,12 @@ def preprocess_like_nnssl(
     dataset_name = convert_id_to_dataset_name(dataset_id)
     print(f"Preprocessing dataset {dataset_name}")
     # Check if nnUNetPLans exists or ResEncL/M/S or whatever
-    potential_plans = ["nnUNetPlans.json"] + [f"nnUNetResEncUNet{k}Plans.json" for k in "_M_L_XL".split("_")]
-    existing_plans = [p for p in potential_plans if isfile(join(nnUNet_preprocessed, dataset_name, p))]
+    potential_plans = ["nnUNetPlans.json"] + [
+        f"nnUNetResEncUNet{k}Plans.json" for k in "_M_L_XL".split("_")
+    ]
+    existing_plans = [
+        p for p in potential_plans if isfile(join(nnUNet_preprocessed, dataset_name, p))
+    ]
     assert len(existing_plans) > 0, (
         f"Could not find any plans file for dataset {dataset_name}."
         + "Please plan the dataset normally first to do preprocessing from pretrained."
@@ -102,17 +112,27 @@ def preprocess_like_nnssl(
     )
     downstream_plans_file = join(nnUNet_preprocessed, dataset_name, existing_plans[0])
     downstream_plans_manager = PlansManager(downstream_plans_file)
-    downstream_config: ConfigurationManager = downstream_plans_manager.get_configuration("3d_fullres")
+    downstream_config: ConfigurationManager = (
+        downstream_plans_manager.get_configuration("3d_fullres")
+    )
     fullres_spacing = downstream_config.spacing
 
     loaded_pretrain_ckpt = torch.load(pt_ckpt, map_location="cpu", weights_only=True)
     adaptation_plan = loaded_pretrain_ckpt["nnssl_adaptation_plan"]
-    citations = loaded_pretrain_ckpt["citations"] if "citations" in loaded_pretrain_ckpt else []
-    pretrain_config = list(adaptation_plan["pretrain_plan"]["configurations"].values())[0]
+    citations = (
+        loaded_pretrain_ckpt["citations"] if "citations" in loaded_pretrain_ckpt else []
+    )
+    pretrain_config = list(adaptation_plan["pretrain_plan"]["configurations"].values())[
+        0
+    ]
     pretrain_spacing = pretrain_config["spacing"]
     architecture_details: dict = adaptation_plan["architecture_plans"]
-    architecture_details["network_class_name"] = architecture_details.pop("arch_class_name")
-    architecture_details["_kw_requires_import"] = architecture_details.pop("arch_kwargs_requiring_import")
+    architecture_details["network_class_name"] = architecture_details.pop(
+        "arch_class_name"
+    )
+    architecture_details["_kw_requires_import"] = architecture_details.pop(
+        "arch_kwargs_requiring_import"
+    )
 
     # -------------------------------- Adapt plan -------------------------------- #
     adapted_plans = deepcopy(downstream_plans_manager)
@@ -125,8 +145,12 @@ def preprocess_like_nnssl(
         "keys_to_in_proj": adaptation_plan["keys_to_in_proj"],
         "key_to_lpe": adaptation_plan["key_to_lpe"],
         "pt_num_in_channels": adaptation_plan["pretrain_num_input_channels"],
-        "pt_used_patchsize": adaptation_plan["pretrain_plan"]["configurations"][config]["patch_size"],
-        "pt_recommended_downstream_patchsize": adaptation_plan["recommended_downstream_patchsize"],
+        "pt_used_patchsize": adaptation_plan["pretrain_plan"]["configurations"][config][
+            "patch_size"
+        ],
+        "pt_recommended_downstream_patchsize": adaptation_plan[
+            "recommended_downstream_patchsize"
+        ],
         "citations": citations,
         # ToDo (Maybe): Add pretrain patch size here instead of overwriting?
         #   Also might make sense to add info on the recommended patch size for downstream training.
@@ -147,10 +171,16 @@ def preprocess_like_nnssl(
     new_normalization_schemes = get_new_normalization_format(adapted_config)
     adapted_config.configuration["normalization_schemes"] = new_normalization_schemes
     # Set Data Identifier
-    spacing_format = "Spacing__{}_{}_{}".format(*[f"{x:.2f}" if x is not None else "None" for x in new_spacing])
-    norm_scheme_identifier = f"Norm__" + "_".join(["Z" for _ in new_normalization_schemes])
+    spacing_format = "Spacing__{}_{}_{}".format(
+        *[f"{x:.2f}" if x is not None else "None" for x in new_spacing]
+    )
+    norm_scheme_identifier = "Norm__" + "_".join(
+        ["Z" for _ in new_normalization_schemes]
+    )
     data_identifier = spacing_format + "___" + norm_scheme_identifier
-    adapted_config.configuration["data_identifier"] = data_identifier  # Set the data identifier clearly.
+    adapted_config.configuration["data_identifier"] = (
+        data_identifier  # Set the data identifier clearly.
+    )
     # Needs to be overriden to be found lower down to call the correct preprocessor.
     adapted_config.configuration["preprocessor_name"] = "DefaultPreprocessor"
     adapted_config.configuration["architecture"] = architecture_details
@@ -161,12 +191,23 @@ def preprocess_like_nnssl(
 
     plans_name = f"ptPlans__{pretrain_name}____{data_identifier}"
     adapted_plans.plans["plans_name"] = plans_name
-    save_json(adapted_plans.plans, join(nnUNet_preprocessed, dataset_name, plans_name + ".json"))
+    save_json(
+        adapted_plans.plans,
+        join(nnUNet_preprocessed, dataset_name, plans_name + ".json"),
+    )
 
-    preprocessor: DefaultPreprocessor = adapted_config.preprocessor_class(verbose=verbose)
+    preprocessor: DefaultPreprocessor = adapted_config.preprocessor_class(
+        verbose=verbose
+    )
     # We never overwrite existing currently, as multiple preprocessors can share the same data files.
     #     Otherwise stuff might break.
-    preprocessor.run(dataset_id, "3d_fullres", plans_name, num_processes=num_processes, overwrite_existing=False)
+    preprocessor.run(
+        dataset_id,
+        "3d_fullres",
+        plans_name,
+        num_processes=num_processes,
+        overwrite_existing=False,
+    )
 
 
 def maybe_download_pretrained_weights(pretrained_checkpoint_path: str):
@@ -179,18 +220,22 @@ def maybe_download_pretrained_weights(pretrained_checkpoint_path: str):
 
     # Check if the path is a Hugging Face repository URL
     if pretrained_checkpoint_path.startswith("https://huggingface.co/"):
-        assert (
-            "nnssl_pretrained_models" in os.environ
-        ), "To allow auto-downloading weights you need to set the environment variable 'nnssl_pretrained_models' to the path where you want to store the pretrained models."
+        assert "nnssl_pretrained_models" in os.environ, (
+            "To allow auto-downloading weights you need to set the environment variable 'nnssl_pretrained_models' to the path where you want to store the pretrained models."
+        )
         local_dir = os.environ["nnssl_pretrained_models"]
-        repo_id = pretrained_checkpoint_path.split("https://huggingface.co/")[-1].strip("/")
+        repo_id = pretrained_checkpoint_path.split("https://huggingface.co/")[-1].strip(
+            "/"
+        )
 
         final_path = os.path.join(local_dir, repo_id.replace("/", "_"))
         if not os.path.exists(final_path):
             os.makedirs(final_path, exist_ok=True)
         # Check if the repository contains the adaptation_plan.json file
         try:
-            _ = hf_hub_download(repo_id=repo_id, filename="adaptation_plan.json", local_dir=final_path)
+            _ = hf_hub_download(
+                repo_id=repo_id, filename="adaptation_plan.json", local_dir=final_path
+            )
         except Exception as e:
             raise ValueError(
                 f"The repository {repo_id} does not contain an adaptation_plan.json file.\n"
@@ -200,23 +245,31 @@ def maybe_download_pretrained_weights(pretrained_checkpoint_path: str):
 
         # Download the checkpoint file
         try:
-            checkpoint_path = hf_hub_download(repo_id=repo_id, filename="checkpoint_final.pth", local_dir=final_path)
+            checkpoint_path = hf_hub_download(
+                repo_id=repo_id, filename="checkpoint_final.pth", local_dir=final_path
+            )
             # For download tracking purposes
-            _ = hf_hub_download(repo_id=repo_id, filename="config.json", local_dir=final_path)
+            _ = hf_hub_download(
+                repo_id=repo_id, filename="config.json", local_dir=final_path
+            )
         except Exception as e:
-            raise ValueError(f"Failed to download the checkpoint file from the repository {repo_id}. " f"Error: {e}")
+            raise ValueError(
+                f"Failed to download the checkpoint file from the repository {repo_id}. "
+                f"Error: {e}"
+            )
 
         # Replace the local path with the downloaded checkpoint path
         pretrained_checkpoint_path = checkpoint_path
 
     # Verify the local path exists
     if not Path(pretrained_checkpoint_path).is_file():
-        raise FileNotFoundError(f"The pretrained checkpoint path {pretrained_checkpoint_path} does not exist.")
+        raise FileNotFoundError(
+            f"The pretrained checkpoint path {pretrained_checkpoint_path} does not exist."
+        )
     return pretrained_checkpoint_path
 
 
 def preprocess_like_nnssl_entrypoint():
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-d",
@@ -289,7 +342,9 @@ def preprocess_like_nnssl_entrypoint():
     num_processes: int = args.np
     verbose: bool = args.verbose
 
-    pretrained_checkpoint_path: str = maybe_download_pretrained_weights(pretrained_checkpoint_path)
+    pretrained_checkpoint_path: str = maybe_download_pretrained_weights(
+        pretrained_checkpoint_path
+    )
 
     preprocess_like_nnssl(
         dataset_id=dataset_ids,

@@ -1,0 +1,39 @@
+
+# Experimental configuration
+# EPFL CS-433 — Brain MRI Foundation Models
+
+experiment:
+  name: frozen_encoder_comparison
+  seed: 42
+
+datasets:
+  - feta
+  - bobs
+
+model:
+  encoder: ResEncL
+  input_channels: 1
+  encoder_modes:
+    - pretrained
+    - random
+  freeze_encoder: true
+  checkpoint: ssl3d_checkpoints/checkpoint_best.pth
+
+training:
+  patch_size: 160
+  batch_size: 1
+  epochs: 100
+  learning_rate: 0.0001
+  optimizer: AdamW
+  loss: DiceCE
+
+evaluation:
+  metrics:
+    - DSC
+    - HD95
+    - VS
+
+output:
+  directory: results/
+  save_checkpoints: true
+  save_config: true

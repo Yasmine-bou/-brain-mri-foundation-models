@@ -1,16 +1,17 @@
-"""Utilities for creating and validating subject-level dataset splits.
+"""Create and validate reproducible FeTA and BOBs dataset splits.
 
 FeTA:
-    Create 60/20/20 splits stratified by gestational age.
-    Check pathology and reconstruction balance.
+    Split 80 fetal MRI subjects into 60% train, 20% validation,
+    and 20% test, stratified by gestational age.
 
 BOBs:
-    Create participant-level splits stratified by age at first scan.
-    Keep all MRI sessions from the same participant in one split.
-    Check sex and session-age balance.
+    Split 51 infant participants into 31 train, 10 validation,
+    and 10 test participants, stratified by age at first scan.
+    All sessions from the same participant remain in one split.
 
-Fixed seeds are used for reproducibility.
-All splits are subject-independent to avoid data leakage.
+The fixed seeds were selected using dataset metadata to balance
+relevant characteristics without using model performance.
+Participant-level separation prevents data leakage.
 """
 
 from pathlib import Path
@@ -20,7 +21,17 @@ from sklearn.model_selection import train_test_split
 
 
 def get_subject_id(path: Path) -> str:
-    """Extract the subject ID from a BIDS-like file path."""
+    """Extract a subject identifier from a BIDS-style file path.
+
+    Args:
+        path: Path containing a directory named 'sub-*'.
+
+    Returns:
+        Subject identifier, including the 'sub-' prefix.
+
+    Raises:
+        ValueError: If no subject identifier is found.
+    """
     for part in Path(path).parts:
         if part.startswith("sub-"):
             return part
@@ -33,25 +44,27 @@ def split_feta(
     metadata_path: Path,
     seed: int = 367,
 ) -> dict[str, list[str]]:
-    """Create reproducible FeTA splits stratified by gestational age.
+    """Create stratified train/validation/test splits for FeTA.
 
-    Uses 60% training, 20% validation and 20% testing.
+    Uses a 60/20/20 subject-level split, stratified by gestational
+    age groups: [20,24), [24,28), [28,32), and [32,36) weeks.
 
-    Gestational age groups:
-        20-24, 24-28, 28-32 and 32-36 weeks.
-
-    Seed 367 was selected using metadata only, to balance
-    age groups, pathology and reconstruction methods.
+    Seed 367 was selected using metadata to balance gestational age,
+    pathology, and MRI reconstruction methods.
 
     Args:
         image_paths: Paths to the FeTA MRI files.
-        metadata_path: Path to the FeTA participants.tsv file.
-        seed: Random seed for reproducibility.
+        metadata_path: Path to FeTA participants.tsv.
+        seed: Random seed for splitting (default: 367).
 
     Returns:
-        Dictionary with train, val and test subject IDs.
+        Dictionary mapping 'train', 'val', and 'test' to sorted
+        subject identifiers.
+
+    Raises:
+        ValueError: If metadata is missing, invalid, or inconsistent
+            with the available MRI files.
     """
-    # Load subject metadata.
     df = pd.read_csv(metadata_path, sep="\t")
 
     required = {"participant_id", "gestational_age", "pathology"}
@@ -65,7 +78,7 @@ def split_feta(
     if df["participant_id"].duplicated().any():
         raise ValueError("Duplicate subjects in FeTA metadata.")
 
-    # Check that metadata and MRI files contain the same subjects.
+    # Verify that MRI files and metadata refer to the same subjects.
     image_subjects = [get_subject_id(path) for path in image_paths]
 
     if len(image_subjects) != len(set(image_subjects)):
@@ -74,10 +87,9 @@ def split_feta(
     if set(image_subjects) != set(df["participant_id"]):
         raise ValueError("FeTA MRI subjects do not match metadata.")
 
-    # Keep the original row order to reproduce the notebook split.
+    # Preserve metadata row order for reproducibility.
     df = df.copy()
 
-    # Group subjects by gestational age.
     df["age_group"] = pd.cut(
         df["gestational_age"],
         bins=[20, 24, 28, 32, 36],
@@ -88,7 +100,7 @@ def split_feta(
     if df["age_group"].isna().any():
         raise ValueError("Gestational age outside expected range.")
 
-    # First split: 60% train, 40% remaining.
+    # Split subjects into 60% train, then divide the remaining 40%.
     train_df, remaining_df = train_test_split(
         df,
         test_size=0.4,
@@ -96,7 +108,6 @@ def split_feta(
         random_state=seed,
     )
 
-    # Second split: 20% validation, 20% test.
     val_df, test_df = train_test_split(
         remaining_df,
         test_size=0.5,
@@ -115,7 +126,7 @@ def split_feta(
         assert len(val_df) == 16
         assert len(test_df) == 16
 
-    # Check the known balance for our chosen FeTA split.
+    # Verify the expected metadata balance for the selected split.
     if seed == 367 and len(df) == 80:
         expected_pathology = {"train": 29, "val": 10, "test": 10}
         expected_age_groups = {
@@ -125,16 +136,15 @@ def split_feta(
         }
 
         for name, subset in subsets.items():
-            assert (
-                (subset["pathology"] == "Pathological").sum()
-                == expected_pathology[name]
-            )
+            assert (subset["pathology"] == "Pathological").sum() == expected_pathology[
+                name
+            ]
             assert (
                 subset["age_group"].value_counts(sort=False).tolist()
                 == expected_age_groups[name]
             )
 
-        # Get reconstruction methods from the MRI filenames.
+        # Reconstruction type is encoded in the MRI filename.
         reconstruction = {}
 
         for path in image_paths:
@@ -157,7 +167,6 @@ def split_feta(
             )
             assert mial_count == expected_mial[name]
 
-    # Save only subject IDs, as before.
     splits = {
         name: sorted(subset["participant_id"].tolist())
         for name, subset in subsets.items()
@@ -172,22 +181,29 @@ def split_bobs(
     metadata_path: Path,
     seed: int = 559,
 ) -> dict[str, list[str]]:
-    """Create reproducible BOBs train/val/test splits.
+    """Create participant-level train/validation/test splits for BOBs.
 
-    Splits the 51 participants into 31 train, 10 val and 10 test.
+    Stratifies the 51 participants by age at their earliest scan,
+    using age groups [1,4), [4,7), and [7,10) months.
 
-    We stratify by age at the first MRI session.
-    All sessions from the same participant stay in the same split.
+    Assigns 31 participants to training, 10 to validation, and
+    10 to testing. Multiple scans from one participant always
+    belong to the same split.
 
-    Seed 559 was selected using metadata only, to balance
-    sex and age distributions across MRI sessions.
+    Seed 559 was selected using metadata to balance sex and age
+    distributions across MRI sessions.
 
     Args:
         metadata_path: Path to BOBs participants.csv.
-        seed: Random seed for reproducibility.
+        seed: Random seed for splitting (default: 559).
 
     Returns:
-        Dictionary with train, val and test participant IDs.
+        Dictionary mapping 'train', 'val', and 'test' to sorted
+        participant identifiers.
+
+    Raises:
+        ValueError: If metadata is incomplete, contains duplicate
+            sessions, or has unexpected participant counts.
     """
     df = pd.read_csv(metadata_path)
 
@@ -203,15 +219,9 @@ def split_bobs(
     if df.duplicated(subset=["participant_id", "session_id"]).any():
         raise ValueError("Duplicate BOBs sessions.")
 
-    # One row per participant, based on the earliest MRI session.
-    # Keep the same ordering as in our notebook.
-    participants = (
-        df.sort_values("age")
-        .drop_duplicates(subset="participant_id")
-        .copy()
-    )
+    # Use the earliest MRI session to stratify each participant.
+    participants = df.sort_values("age").drop_duplicates(subset="participant_id").copy()
 
-    # Create age groups (months).
     participants["age_group"] = pd.cut(
         participants["age"],
         bins=[1, 4, 7, 10],
@@ -223,11 +233,9 @@ def split_bobs(
         raise ValueError("Age outside expected range.")
 
     if len(participants) != 51:
-        raise ValueError(
-            f"Expected 51 participants, found {len(participants)}."
-        )
+        raise ValueError(f"Expected 51 participants, found {len(participants)}.")
 
-    # First split: 31 train, 20 remaining.
+    # First allocate 31 training participants, then split the rest equally.
     train_df, remaining_df = train_test_split(
         participants,
         train_size=31,
@@ -235,7 +243,6 @@ def split_bobs(
         random_state=seed,
     )
 
-    # Second split: 10 validation, 10 test.
     val_df, test_df = train_test_split(
         remaining_df,
         test_size=10,
@@ -252,8 +259,8 @@ def split_bobs(
     assert len(train_df) == 31
     assert len(val_df) == 10
     assert len(test_df) == 10
-    
-    # Check the balance found during our investigation.
+
+    # Verify sex balance and scan counts for the selected split.
     if seed == 559 and len(participants) == 51:
         expected_female = {"train": 19, "val": 6, "test": 6}
         expected_sessions = {"train": 42, "val": 15, "test": 14}
@@ -262,12 +269,10 @@ def split_bobs(
             female_count = (subset["sex"] == "Female").sum()
             assert female_count == expected_female[name]
 
-            session_count = df["participant_id"].isin(
-                subset["participant_id"]
-            ).sum()
+            session_count = df["participant_id"].isin(subset["participant_id"]).sum()
             assert session_count == expected_sessions[name]
 
-    # Save participant IDs, not individual sessions.
+    # Store participant IDs, not individual MRI sessions.
     splits = {
         name: sorted(subset["participant_id"].tolist())
         for name, subset in subsets.items()
@@ -275,7 +280,6 @@ def split_bobs(
 
     validate_splits(splits)
 
-    # Make sure all 71 MRI sessions are assigned.
     all_ids = set().union(*(set(ids) for ids in splits.values()))
 
     assert all_ids == set(df["participant_id"])
@@ -284,9 +288,16 @@ def split_bobs(
     return splits
 
 
-
 def validate_splits(splits: dict[str, list[str]]) -> None:
-    """Check that participants are unique and do not overlap across splits."""
+    """Validate that train, validation, and test participants do not overlap.
+
+    Args:
+        splits: Dictionary mapping split names to participant ID lists.
+
+    Raises:
+        ValueError: If participant IDs are duplicated within a split
+            or shared across splits.
+    """
     seen = set()
 
     for split_name, subjects in splits.items():
@@ -296,8 +307,6 @@ def validate_splits(splits: dict[str, list[str]]) -> None:
         overlap = seen.intersection(subjects)
 
         if overlap:
-            raise ValueError(
-                f"Participant overlap in {split_name}: {sorted(overlap)}"
-            )
+            raise ValueError(f"Participant overlap in {split_name}: {sorted(overlap)}")
 
         seen.update(subjects)

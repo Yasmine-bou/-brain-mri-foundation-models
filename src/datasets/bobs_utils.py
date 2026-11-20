@@ -17,11 +17,33 @@ EXPECTED_COUNTS = {"train": 42, "val": 15, "test": 14}
 
 
 def subject_id(entry):
-    """Read participant ID from a split entry (string or small dictionary)."""
+    """Extract a normalized BOBs participant ID from a split entry.
+
+    Accepts a string or dictionary and ensures the ID starts with 'sub-'.
+
+    Args:
+        entry: Participant identifier or dictionary containing one.
+
+    Returns:
+        Normalized participant ID, e.g. 'sub-116056'.
+    """
     if isinstance(entry, str):
         value = entry
     elif isinstance(entry, dict):
-        value = next((entry[k] for k in ("participant_id", "subject_id", "participant", "subject", "id") if k in entry), None)
+        value = next(
+            (
+                entry[k]
+                for k in (
+                    "participant_id",
+                    "subject_id",
+                    "participant",
+                    "subject",
+                    "id",
+                )
+                if k in entry
+            ),
+            None,
+        )
     else:
         value = None
     if not isinstance(value, str) or not value.strip():
@@ -31,6 +53,17 @@ def subject_id(entry):
 
 
 def load_splits(path: Path):
+    """Load and validate participant-level train/val/test splits.
+
+    Ensures participants are unique within each split and that no
+    participant appears in multiple splits.
+
+    Args:
+        path: Path to the JSON split file.
+
+    Returns:
+        Dictionary mapping split names to sets of participant IDs.
+    """
     splits = json.loads(Path(path).read_text(encoding="utf-8"))
     if set(splits) != {"train", "val", "test"}:
         raise ValueError(f"Expected train/val/test split keys, got {list(splits)}")
@@ -39,7 +72,9 @@ def load_splits(path: Path):
         raise ValueError("Duplicate subject IDs in splits")
     for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
         if groups[a] & groups[b]:
-            raise ValueError(f"Subject leakage between {a} and {b}: {groups[a] & groups[b]}")
+            raise ValueError(
+                f"Subject leakage between {a} and {b}: {groups[a] & groups[b]}"
+            )
     return groups
 
 
@@ -52,7 +87,7 @@ def matching_segmentation(mri: Path):
     name = mri.name
     if not name.endswith("_T2w.nii.gz"):
         raise ValueError(f"Not a T2w MRI: {mri}")
-    prefix = name[:-len("_T2w.nii.gz")]
+    prefix = name[: -len("_T2w.nii.gz")]
     # First prefer the exact corresponding BIDS-style filename.
     exact = mri.with_name(prefix + "_desc-bobs9_dseg.nii.gz")
     if exact.exists():
@@ -72,7 +107,9 @@ def find_pairs(bobs_root: Path, groups: dict):
     bobs_root = Path(bobs_root)
     if not bobs_root.exists():
         raise FileNotFoundError(bobs_root)
-    split_by_subject = {subject: split for split, ids in groups.items() for subject in ids}
+    split_by_subject = {
+        subject: split for split, ids in groups.items() for subject in ids
+    }
     found = {key: [] for key in groups}
     unassigned = []
     for mri in sorted(bobs_root.rglob("*_T2w.nii.gz")):
@@ -87,8 +124,13 @@ def find_pairs(bobs_root: Path, groups: dict):
         mask = matching_segmentation(mri)
         found[split_by_subject[subject]].append((subject, mri, mask))
     if unassigned:
-        raise ValueError(f"{len(unassigned)} T2w files have no subject in splits. Examples: {unassigned[:3]}")
-    missing = {split: sorted(ids - {subject for subject, _, _ in found[split]}) for split, ids in groups.items()}
+        raise ValueError(
+            f"{len(unassigned)} T2w files have no subject in splits. Examples: {unassigned[:3]}"
+        )
+    missing = {
+        split: sorted(ids - {subject for subject, _, _ in found[split]})
+        for split, ids in groups.items()
+    }
     if any(missing.values()):
         raise ValueError(f"Some split participants have no MRI: {missing}")
     return found
@@ -96,7 +138,7 @@ def find_pairs(bobs_root: Path, groups: dict):
 
 def make_case_id(subject: str, mri_path: Path) -> str:
     """Unique nnU-Net case name, retaining any session/scan descriptors."""
-    filename = mri_path.name[:-len("_T2w.nii.gz")]
+    filename = mri_path.name[: -len("_T2w.nii.gz")]
     # Filename usually contains sub- and ses- entities. If session occurs only
     # in folders, include it to avoid collisions.
     session = next((x for x in mri_path.parts if x.startswith("ses-")), None)
@@ -107,6 +149,21 @@ def make_case_id(subject: str, mri_path: Path) -> str:
 
 
 def validated_arrays(mri_path: Path, seg_path: Path):
+    """Validate a paired BOBs MRI and segmentation.
+
+    Checks matching 3D shapes, spatial alignment through affine
+    matrices, finite integer labels, and allowed BOBs9 class IDs.
+
+    Args:
+        mri_path: Path to the T2-weighted NIfTI image.
+        seg_path: Path to its BOBs9 segmentation.
+
+    Returns:
+        Segmentation NIfTI object and original integer label array.
+
+    Raises:
+        ValueError: If image/mask geometry or labels are invalid.
+    """
     image = nib.load(str(mri_path))
     seg = nib.load(str(seg_path))
     if len(image.shape) != 3 or image.shape != seg.shape:
@@ -115,15 +172,43 @@ def validated_arrays(mri_path: Path, seg_path: Path):
         raise ValueError(f"MRI/mask affine mismatch: {mri_path} vs {seg_path}")
     raw = np.asarray(seg.dataobj)
     if not np.isfinite(raw).all() or not np.allclose(raw, np.rint(raw), atol=1e-5):
-        raise ValueError(f"Segmentation has non-integer or non-finite values: {seg_path}")
+        raise ValueError(
+            f"Segmentation has non-integer or non-finite values: {seg_path}"
+        )
     labels = {int(v) for v in np.unique(raw)}
     if not labels.issubset(LABEL_MAP):
-        raise ValueError(f"Unexpected labels in {seg_path}: {sorted(labels - LABEL_MAP.keys())}")
+        raise ValueError(
+            f"Unexpected labels in {seg_path}: {sorted(labels - LABEL_MAP.keys())}"
+        )
     return seg, raw
 
 
 def remap_mask(raw: np.ndarray) -> np.ndarray:
+    """Convert BOBs9 labels to consecutive indices using LABEL_MAP.
+
+    Args:
+        raw: Segmentation containing original BOBs9 class IDs.
+
+    Returns:
+        uint8 segmentation with labels 0-7.
+
+    Raises:
+        ValueError: If unexpected or non-integer labels are present.
+    """
+    if not np.isfinite(raw).all():
+        raise ValueError("Segmentation contains non-finite values.")
+
+    if not np.all(raw == np.rint(raw)):
+        raise ValueError("Segmentation contains non-integer labels.")
+
+    unknown = set(np.unique(raw)) - set(LABEL_MAP)
+
+    if unknown:
+        raise ValueError(f"Unexpected BOBs9 labels: {sorted(unknown)}")
+
     output = np.zeros(raw.shape, dtype=np.uint8)
+
     for old, new in LABEL_MAP.items():
         output[raw == old] = new
+
     return output

@@ -1,0 +1,42 @@
+
+# ============================================================
+# Brain MRI Foundation Models — EPFL CS-433 (Fall 2026)
+# Python dependencies
+# ============================================================
+
+# Deep learning
+torch
+torchvision
+
+# Medical image processing and segmentation
+monai
+nibabel
+SimpleITK
+
+# Preprocessed SSL3D / nnU-Net data loading
+blosc2
+
+# Numerical computing and scientific utilities
+numpy
+scipy
+scikit-learn
+
+# Data manipulation
+pandas
+
+# Visualization
+matplotlib
+seaborn
+
+# Progress bars and utilities
+tqdm
+PyYAML
+
+# Jupyter notebooks
+jupyterlab
+ipykernel
+
+# Code quality and testing
+pytest
+pre-commit
+ruff

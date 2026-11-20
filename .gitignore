@@ -55,3 +55,14 @@ tensorboard/
 
 .DS_Store
 Thumbs.db
+
+
+# Python build artifacts
+*.egg-info/
+dist/
+build/
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
