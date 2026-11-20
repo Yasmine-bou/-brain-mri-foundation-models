@@ -385,3 +385,7 @@ Detailed instructions for reproducing the experiments will be provided as the pr
 **Course:** EPFL CS-433 Machine Learning.
 
 **Submission deadline:** December 17, 2026.
+
+## Reproducibility
+
+For step-by-step instructions to reproduce the experiments from scratch, see [Reproducibility Guide](REPRODUCIBILITY_GUIDE.md).
